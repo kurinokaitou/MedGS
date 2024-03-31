@@ -12,8 +12,10 @@
 import os
 import random
 import json
+
+import numpy as np
 from utils.system_utils import searchForMaxIteration
-from scene.dataset_readers import sceneLoadTypeCallbacks
+from scene.dataset_readers import SceneInfo, sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
@@ -41,11 +43,15 @@ class Scene:
         self.test_cameras = {}
 
         if os.path.exists(os.path.join(args.source_path, "sparse")):
-            scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval)
+            scene_info : SceneInfo = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
-            scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval)
-        else:
+            scene_info : SceneInfo = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval)
+        elif os.path.exists(os.path.join(args.source_path, "data.pickle")):
+            print("Found .pickle file, assuming CBCT dataset!")
+            scene_info : SceneInfo = sceneLoadTypeCallbacks["CBCT"](args.source_path, "data.pickle", args.eval)
+            gaussians.set_bound(scene_info.min_bound, scene_info.max_bound)
+        else :
             assert False, "Could not recognize scene type!"
 
         if not self.loaded_iter:
@@ -91,3 +97,14 @@ class Scene:
 
     def getTestCameras(self, scale=1.0):
         return self.test_cameras[scale]
+    
+    def save_position(self, iteration):
+        point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
+        xyz = self.gaussians._xyz.cpu().data.numpy()
+        min_box = np.min(xyz, axis=0)
+        max_box = np.max(xyz, axis=0)
+        print("The bound of the volume is", min_box, max_box)
+        serialize_xyz = xyz.tolist()
+        with open(os.path.join(point_cloud_path,"positions.json"),'w') as file:
+            json.dump(serialize_xyz, file)
+        

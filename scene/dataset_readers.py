@@ -13,6 +13,7 @@ import os
 import sys
 from PIL import Image
 from typing import NamedTuple
+from preprocess.tigre import CameraInfo, TIGREDataset
 from scene.colmap_loader import read_extrinsics_text, read_intrinsics_text, qvec2rotmat, \
     read_extrinsics_binary, read_intrinsics_binary, read_points3D_binary, read_points3D_text
 from utils.graphics_utils import getWorld2View2, focal2fov, fov2focal
@@ -23,17 +24,6 @@ from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
 
-class CameraInfo(NamedTuple):
-    uid: int
-    R: np.array
-    T: np.array
-    FovY: np.array
-    FovX: np.array
-    image: np.array
-    image_path: str
-    image_name: str
-    width: int
-    height: int
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -41,6 +31,8 @@ class SceneInfo(NamedTuple):
     test_cameras: list
     nerf_normalization: dict
     ply_path: str
+    min_bound: float = 0.0
+    max_bound: float = 0.0
 
 def getNerfppNorm(cam_info):
     def get_center_and_diag(cam_centers):
@@ -64,6 +56,9 @@ def getNerfppNorm(cam_info):
     translate = -center
 
     return {"translate": translate, "radius": radius}
+
+def getCBCTCamNorm():
+    return {"translate": [0.0, 0.0, 0.0], "radius": 1.0}
 
 def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
     cam_infos = []
@@ -254,7 +249,51 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
                            ply_path=ply_path)
     return scene_info
 
+def readCBCTSceneInfo(path, file_name, eval):
+    print("Reading Training dataset")
+    train_dataset = TIGREDataset(os.path.join(path, file_name), "train")
+    print("Reading Testing dataset")
+    test_dataset = TIGREDataset(os.path.join(path, file_name), "test")    
+    
+    if not eval:
+        train_dataset.cam_infos.extend(test_dataset.cam_infos)
+        test_dataset.cam_infos=[]
+    
+    scene_normalization = getCBCTCamNorm()
+    dist = 0
+    ply_path = os.path.join(path, "points3d.ply")
+    if not os.path.exists(ply_path):
+        # Since this data set has no colmap data, we start with random points
+        num_pts = 500_00
+        print(f"Generating random point cloud ({num_pts})...")
+        
+        near, far = train_dataset.getNearFar()
+        dist = far - near
+        print(far, near, dist)
+        # We create random points inside the bounds of the synthetic Blender scenes
+        xyz = np.random.random((num_pts, 3)) * dist - dist/2.0
+        shs = np.random.random((num_pts, 3)) / 255.0
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+
+        storePly(ply_path, xyz, SH2RGB(shs) * 255)
+        pass
+        
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_dataset.cam_infos,
+                           test_cameras=test_dataset.cam_infos,
+                           nerf_normalization=scene_normalization,
+                           ply_path=ply_path,
+                           min_bound=-dist/2.0, 
+                           max_bound=dist/2.0)
+    return scene_info
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
-    "Blender" : readNerfSyntheticInfo
+    "Blender" : readNerfSyntheticInfo,
+    "CBCT" : readCBCTSceneInfo
 }
